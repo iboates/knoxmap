@@ -158,6 +158,78 @@ def uses_of(tag_sets: list[dict], limit: int = 8) -> list[tuple[str, str]]:
     return out[:limit]
 
 
+# What a building's ground floor is, in words, from the rooms it was given:
+# "pizza place", not "shop". The rooms and not the tags, so the shops dealt at
+# random where OpenStreetMap says nothing are named too, and the name is what
+# the game will find there. A kitchen says more than the dining room in front
+# of it - every restaurant's dining room is restaurantdining - so kitchens go
+# first and a named one stands in for the dining room.
+KITCHEN_TRADES = {
+    "pizzakitchen": "pizza place", "burgerkitchen": "burger place",
+    "chinesekitchen": "Chinese restaurant", "sushikitchen": "sushi restaurant",
+    "mexicankitchen": "Mexican restaurant", "seafoodkitchen": "seafood restaurant",
+    "dinerkitchen": "diner", "cafekitchen": "cafe", "bakerykitchen": "bakery",
+    "icecreamkitchen": "ice cream shop", "restaurantkitchen": "restaurant",
+}
+FRONT_TRADES = {
+    "italianrestaurant": "Italian restaurant", "chineserestaurant": "Chinese restaurant",
+    "restaurantdining": "restaurant", "cafe": "cafe", "icecream": "ice cream shop",
+    "bar": "bar", "bakery": "bakery", "grocery": "grocery store",
+    "conveniencestore": "convenience store", "liquorstore": "liquor store",
+    "candystore": "candy store", "butcher": "butcher", "pharmacy": "pharmacy",
+    "aesthetic": "salon", "clothingstore": "clothing store",
+    "departmentstore": "department store", "jewelrystore": "jewelry store",
+    "bookstore": "bookstore", "movierental": "video store", "toystore": "toy store",
+    "giftstore": "gift shop", "gardenstore": "garden store",
+    "furniturestore": "furniture store", "musicstore": "music store",
+    "camerastore": "electronics store", "sportstore": "sports store",
+    "gunstore": "gun store", "toolstore": "hardware store", "mechanic": "car repair",
+    "laundry": "laundromat", "generalstore": "general store", "bank": "bank",
+    "post": "post office", "dentist": "dentist", "medicaloffice": "doctor's office",
+    "library": "library", "gym": "gym", "gasstore": "gas station",
+    "daycare": "daycare", "policeoffice": "police station", "theatre": "theatre",
+}
+# The dining rooms a named kitchen speaks for.
+_DINING = {"restaurantdining", "italianrestaurant", "chineserestaurant"}
+
+
+def trade_of(room_kinds: list[str], limit: int = 4) -> list[str]:
+    """What a ground floor with these rooms is, in words, each once and in
+    order: ["pizza place"], ["bakery", "salon"]. Empty for a home."""
+    kinds = set(room_kinds)
+    named_kitchen = any(k in KITCHEN_TRADES and k != "restaurantkitchen" for k in kinds)
+    named_dining = bool(kinds & (_DINING - {"restaurantdining"}))
+    out: list[str] = []
+    for kind in room_kinds:
+        if kind in KITCHEN_TRADES:
+            if kind == "restaurantkitchen" and (named_kitchen or named_dining):
+                continue               # the Italian dining room says more
+            label = KITCHEN_TRADES[kind]
+        elif kind in FRONT_TRADES:
+            if kind in _DINING and named_kitchen:
+                continue               # its kitchen has said what it is
+            label = FRONT_TRADES[kind]
+        else:
+            continue
+        if label not in out:
+            out.append(label)
+    return out[:limit]
+
+
+def business_names(tag_sets: list[dict], only: list[tuple[str, str]] | None = None,
+                   limit: int = 4) -> list[str]:
+    """The names of the businesses mapped in a building - its own, if it is
+    one, and the points inside it. `only` keeps those whose use is in it: the
+    unit of a row of shops that was given that use."""
+    out: list[str] = []
+    for tags in tag_sets:
+        name = (tags.get("name") or "").strip()
+        use = use_of(tags)
+        if name and use and (only is None or use in only) and name not in out:
+            out.append(name)
+    return out[:limit]
+
+
 def is_hotel(tag_sets: list[dict]) -> bool:
     return any((t.get("tourism") or "") in ("hotel", "motel", "hostel") or
                (t.get("building") or "") == "hotel" for t in tag_sets)

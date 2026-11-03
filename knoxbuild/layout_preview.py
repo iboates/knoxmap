@@ -75,10 +75,16 @@ def draw(map_dir: str, layer: str = "kinds") -> Image.Image:
             base = Image.fromarray(arr.astype(np.uint8))
 
     pen = ImageDraw.Draw(base)
-    used: dict[str, int] = {}
+    used: dict[tuple[str, str], int] = {}
+    labels = []
     for r in rows:
         kind = r.get("kind") or "house"
-        used[kind] = used.get(kind, 0) + 1
+        # What it sells, where the build said: a pizza place is a pizza place
+        # here, not one more "shop" (knoxbuild/uses.trade_of).
+        trade = [t for t in (r.get("trade") or "").split("; ") if t]
+        business = [b for b in (r.get("business") or "").split("; ") if b]
+        key = (trade[0] if trade else kind, kind)
+        used[key] = used.get(key, 0) + 1
         x0, y0 = int(r["tile_x"]) // step, int(r["tile_y"]) // step
         x1 = max(x0 + 1, (int(r["tile_x"]) + int(r["width"])) // step)
         y1 = max(y0 + 1, (int(r["tile_y"]) + int(r["height"])) // step)
@@ -87,24 +93,57 @@ def draw(map_dir: str, layer: str = "kinds") -> Image.Image:
         else:
             pen.rectangle([x0, y0, x1, y1], fill=KIND_COLOURS.get(kind, OTHER),
                           outline=(40, 40, 40))
+        if trade and layer == "kinds":
+            short = ", ".join(trade)
+            long = short + ("\n" + ", ".join(business) if business else "")
+            labels.append(((x1 - x0) * (y1 - y0), (x0 + x1) / 2, (y0 + y1) / 2, long, short))
+    _labels(pen, labels, _font(base.size, 110))
     _legend(pen, base.size, used, layer)
     return base
 
 
+def _labels(pen: ImageDraw.ImageDraw, labels: list, font) -> None:
+    """What each shop is, written on it, on top of every building. A street of
+    shops side by side wrote them over one another until none could be read,
+    so each takes room nothing else has taken: the biggest buildings first,
+    with the business's name if it fits, else what it is, else nothing - the
+    legend still counts it."""
+    taken: list[tuple[float, float, float, float]] = []
+
+    def free(box):
+        return all(box[2] < t[0] or box[0] > t[2] or box[3] < t[1] or box[1] > t[3]
+                   for t in taken)
+
+    for _area, x, y, long, short in sorted(labels, key=lambda l: -l[0]):
+        for text in dict.fromkeys((long, short)):
+            box = pen.multiline_textbbox((x, y), text, font=font, anchor="mm",
+                                         align="center", stroke_width=2)
+            if free(box):
+                taken.append(box)
+                pen.multiline_text((x, y), text, fill=(20, 20, 20), font=font,
+                                   anchor="mm", align="center", stroke_width=2,
+                                   stroke_fill=(255, 255, 255))
+                break
+
+
 def _legend(pen: ImageDraw.ImageDraw, size: tuple[int, int], used: dict,
             layer: str) -> None:
-    try:
-        font = ImageFont.load_default(size=max(12, size[0] // 90))
-    except TypeError:                      # an older Pillow has one size only
-        font = ImageFont.load_default()
+    font = _font(size, 90)
     if layer == "zombies":
         items = [("more zombies = redder", (220, 30, 30), None)]
     else:
-        items = [(k, KIND_COLOURS.get(k, OTHER), n)
-                 for k, n in sorted(used.items(), key=lambda kv: -kv[1])]
+        # Grouped by kind, the commonest first, so the shops' trades sit
+        # together under one colour.
+        per_kind: dict[str, int] = {}
+        for (_label, kind), n in used.items():
+            per_kind[kind] = per_kind.get(kind, 0) + n
+        order = sorted(used.items(), key=lambda kv: (-per_kind[kv[0][1]], kv[0][1], -kv[1]))
+        items = [(label, KIND_COLOURS.get(kind, OTHER), n) for (label, kind), n in order]
     line = max(14, size[0] // 80)
     pad = line // 2
-    pen.rectangle([pad, pad, pad + line * 12, pad * 2 + line * len(items) + pad],
+    wide = max([pen.textlength(label if n is None else f"{label} {n}", font=font)
+                for label, _c, n in items] + [line * 10])
+    pen.rectangle([pad, pad, pad * 3 + line + wide, pad * 2 + line * len(items) + pad],
                   fill=(255, 255, 255), outline=(60, 60, 60))
     for i, (label, colour, n) in enumerate(items):
         y = pad * 2 + i * line
@@ -112,6 +151,14 @@ def _legend(pen: ImageDraw.ImageDraw, size: tuple[int, int], used: dict,
                       outline=(40, 40, 40))
         pen.text((pad * 2 + line, y - 1), label if n is None else f"{label} {n}",
                  fill=(20, 20, 20), font=font)
+
+
+def _font(size: tuple[int, int], per: int):
+    """The default font, one `per`th of the picture's width."""
+    try:
+        return ImageFont.load_default(size=max(10, size[0] // per))
+    except TypeError:                      # an older Pillow has one size only
+        return ImageFont.load_default()
 
 
 def render_to(map_dir: str, layer: str = "kinds") -> str:

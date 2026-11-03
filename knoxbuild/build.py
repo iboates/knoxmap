@@ -36,7 +36,7 @@ from .fences import build_fences
 from . import footprint
 from .footprint import place
 from .layout import build_building
-from .uses import USE_KEYS, is_hotel, uses_of
+from .uses import USE_KEYS, business_names, is_hotel, trade_of, uses_of
 from .context import Context, style_fits
 from .population import build_spawn_map, official_population, save_footprints
 from .profile import BuildingProfile
@@ -1208,6 +1208,10 @@ def _party_walls(owner: np.ndarray, me: int, x0: int, y0: int, mask: np.ndarray,
                         out[edge] = max(out.get(edge, 0), levels[other])
     return out
 
+# The kinds that are a business whether or not one is mapped in them: what
+# their ground floor sells is worth naming (knoxbuild/uses.trade_of).
+TRADING_KINDS = {"shop", "restaurant", "mall", "garage"}
+
 
 def _make_one(job: tuple) -> tuple:
     """Lay out one building and write its .tbx. Returns (storeys, rooms,
@@ -1228,10 +1232,10 @@ def _make_one(job: tuple) -> tuple:
         except OSError as exc:
             return (0, 0, 0, f"{os.path.basename(path)}: the preset "
                              f"{os.path.basename(preset_file)} could not be "
-                             f"read ({exc})", [])
+                             f"read ({exc})", [], [])
         from . import presets as P
         about = P.measure(text) or {"storeys": 1, "rooms": 0}
-        return (about["storeys"], about["rooms"], 0, None, [])
+        return (about["storeys"], about["rooms"], 0, None, [], [])
     try:
         # a house planned whole by the room solver (Settings.room_solver), when
         # it is on and the house fits; anything else is laid out as always
@@ -1252,12 +1256,19 @@ def _make_one(job: tuple) -> tuple:
     except Exception:  # noqa: BLE001
         import traceback
         return (0, 0, 0, f"{os.path.basename(path)} ({kind or 'house'}, {w}x{h}, "
-                         f"{levels} storeys): {traceback.format_exc()}", [])
+                         f"{levels} storeys): {traceback.format_exc()}", [], [])
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
+    # Only where there is a business: a house's laundry room is a room called
+    # "laundry" too, and is not a laundromat, and a school's library and gym
+    # are the school's. `retail` is only the street being built up; it puts
+    # shops under a block of flats and nowhere else (layout.build_building).
+    trading = (bool(uses) or kind in TRADING_KINDS
+               or (retail and kind == "apartment" and levels >= 3))
+    ground = plan.storeys[0].rooms if plan.storeys and trading else []
     return (len(plan.storeys), len(plan.rooms),
             sum(len(s.furniture) for s in plan.storeys), None,
-            list(plan.escalators))
+            list(plan.escalators), trade_of([getattr(r, "kind", "") for r in ground]))
 
 
 # Below this many buildings, starting worker processes costs more than it saves.
@@ -1510,6 +1521,7 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
     gunshops: set[str] = set()   # and the buildings OSM says sell weapons
     canopies: list[list] = []    # and the canopies over their forecourts
     decided: list[tuple] = []    # and what the map needs to know about it
+    businesses: dict[str, list[str]] = {}   # file -> the businesses mapped in it
     surroundings: list[tuple[float, float, float, int | None]] = []
     centres: dict[int, tuple[float, float]] = {}   # each building's centroid
     for i, feat in enumerate(geo["features"]):
@@ -1823,6 +1835,7 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                          preset_file))
             outline = px if len(units) == 1 else [
                 (ux0, uy0), (ux0 + uw, uy0), (ux0 + uw, uy0 + uh), (ux0, uy0 + uh)]
+            businesses[fname] = business_names(inside, unit_uses if len(units) > 1 else None)
             decided.append((fname, label, ux0, uy0, uw, uh, unit, outline, special,
                             measured, commercial, style, umask,
                             real_name if n == 0 else ""))
@@ -1853,9 +1866,9 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
         old = earlier.get(d[0])
         if (old and old.get("key") == keys[j] and d[0] in earlier_files
                 and os.path.exists(os.path.join(bdir, d[0]))):
-            storeys, rooms, furniture, escalators = old["result"]
+            storeys, rooms, furniture, escalators, *trade = old["result"]
             results[j] = (storeys, rooms, furniture, None,
-                          [tuple(e) for e in escalators])
+                          [tuple(e) for e in escalators], trade[0] if trade else [])
         else:
             todo.append(j)
     reused = len(jobs) - len(todo)
@@ -1872,7 +1885,7 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
 
     for (fname, label, x0, y0, w, h, fp, px, special, measured, commercial,
          style, mask, real_name), (storeys, rooms, furniture, error,
-                                   escalators) in zip(decided, results):
+                                   escalators, trade) in zip(decided, results):
         if error:
             failed_buildings.append(error)
             continue
@@ -1902,13 +1915,16 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
             "style": style["name"],
             "shaped": int(mask is not None),
             "angle": round(fp.angle, 1),
+            # What its ground floor is and who is there, for the preview.
+            "trade": "; ".join(trade),
+            "business": "; ".join(businesses.get(fname, ())),
         })
     rows.sort(key=lambda r: r["file"])
     knoxstop.check(should_stop, "the buildings")
 
     # Remember what was made, and clear out what was left from before and not
     # written this time.
-    entries = {d[0]: {"key": keys[j], "result": [r_[0], r_[1], r_[2], r_[4]]}
+    entries = {d[0]: {"key": keys[j], "result": [r_[0], r_[1], r_[2], r_[4], r_[5]]}
                for j, (d, r_) in enumerate(zip(decided, results)) if not r_[3]}
     _write_cache(out_dir, code, entries)
     for stale in earlier_files - set(entries):
